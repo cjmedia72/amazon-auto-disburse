@@ -1264,7 +1264,8 @@ async function checkDue() {
     pendingDashboardTab: tab.id,
     pendingAccountsDue: accountsDue,
     dashboardTimer: Date.now(),
-    currentRunDashboardTab: tab.id
+    currentRunDashboardTab: tab.id,
+    currentRunSource: 'heartbeat'
   });
   await appendMegaDebug({ kind: 'dashboard_opened', tabId: tab.id, source: 'heartbeat', accountsDue });
 }
@@ -1607,7 +1608,7 @@ try {
       // Using the original snapshot would clobber drainQueue's new tab id.
       const fresh = await chrome.storage.local.get('currentRunDashboardTab');
       if (fresh.currentRunDashboardTab === tabId) {
-        await chrome.storage.local.remove(['currentRunDashboardTab', 'pendingDashboardTab']);
+        await chrome.storage.local.remove(['currentRunDashboardTab', 'pendingDashboardTab', 'currentRunSource']);
         await appendMegaDebug({ kind: 'tab_removed_cleanup_dashboard', tabId });
         // R2F14: signal popup that the run died (only when dashboard tab
         // unexpectedly closes, not when extension closed it normally)
@@ -2000,7 +2001,7 @@ async function handleDashboardResult(msg, sender) {
     if (tabId) closeTab(tabId);
     await addLog('Dashboard: session expired — login required', 'warn');
     notify('Session Expired', 'Login to Seller Central required.');
-    await chrome.storage.local.remove(['processingLock', 'currentRunDashboardTab', 'pendingDashboardTab']);
+    await chrome.storage.local.remove(['processingLock', 'currentRunDashboardTab', 'pendingDashboardTab', 'currentRunSource']);
     try { chrome.runtime.sendMessage({ action: 'runComplete' }); } catch (_) {}
     return;
   }
@@ -2009,12 +2010,27 @@ async function handleDashboardResult(msg, sender) {
   const eligible = accounts.filter(a => a.eligible && a.balance > 0 && a.buttonRect && pendingAccountsDue.includes(a.type));
 
   if (eligible.length === 0) {
-    if (tabId) closeTab(tabId);
     await addLog('Dashboard: no eligible accounts with balance > $0');
     for (const a of accounts.filter(a => !a.eligible || a.balance <= 0)) {
       await addLog(`  ${a.type}: balance=$${a.balance}, eligible=${a.eligible}`);
     }
-    await chrome.storage.local.remove(['processingLock', 'currentRunDashboardTab', 'pendingDashboardTab']);
+
+    // Discover cooldown for ineligible accounts that have balance > $0 — the
+    // detail page is the source of truth for "X hrs Y mins remaining". Manual
+    // run forces re-discovery; scheduled trusts cached nextEligible_<TYPE>.
+    const discoverCandidates = accounts.filter(
+      a => !a.eligible && a.balance > 0 && pendingAccountsDue.includes(a.type)
+    );
+    if (discoverCandidates.length > 0 && tabId) {
+      const { currentRunSource = 'heartbeat' } = await chrome.storage.local.get('currentRunSource');
+      await addLog(`Discovering cooldown for ${discoverCandidates.length} account(s) — source=${currentRunSource}`);
+      await runDiscoveryPass(tabId, discoverCandidates, currentRunSource);
+    }
+
+    if (tabId) closeTab(tabId);
+    await chrome.storage.local.remove([
+      'processingLock', 'currentRunDashboardTab', 'pendingDashboardTab', 'currentRunSource'
+    ]);
     try { chrome.runtime.sendMessage({ action: 'runComplete' }); } catch (_) {}
     return;
   }
@@ -2031,6 +2047,205 @@ async function handleDashboardResult(msg, sender) {
   }
 
   await processDashboardClick(tabId, first);
+}
+
+// ── Discover-cooldown path ──
+// When the dashboard reports an account as ineligible (button disabled or
+// missing), we still want to know WHY so the popup can show "X hrs Y mins
+// remaining". The detail page exposes this via .ineligibility-alert text.
+// We navigate the dashboard tab directly to the detail URL (no click —
+// button is disabled), let it hydrate, scrape the alert, parse hrs/mins,
+// store nextEligible_<TYPE>, then close the tab.
+//
+// Lock semantics: discoverInFlight_<TYPE> = timestamp. Held for the duration
+// of one discovery; max 90s (auto-released on timeout). Prevents concurrent
+// discovery of the same account across overlapping run dispatches.
+
+const DISCOVER_LOCK_TIMEOUT_MS = 90000;
+const DISCOVER_HYDRATE_DELAY_MS = 4000;
+const DISCOVER_POLL_INTERVAL_MS = 500;
+const DISCOVER_POLL_TIMEOUT_MS = 18000;
+
+async function discoverCooldown(tabId, accountType) {
+  const lockKey = `discoverInFlight_${accountType}`;
+  const lockData = await chrome.storage.local.get(lockKey);
+  const lockTs = lockData[lockKey];
+  if (typeof lockTs === 'number' && (Date.now() - lockTs) < DISCOVER_LOCK_TIMEOUT_MS) {
+    await appendMegaDebug({
+      kind: 'discover_skipped',
+      reason: 'in_flight',
+      accountType, ageMs: Date.now() - lockTs
+    });
+    return { ok: false, reason: 'in_flight' };
+  }
+  await chrome.storage.local.set({ [lockKey]: Date.now() });
+
+  const releaseLock = () => chrome.storage.local.remove(lockKey).catch(() => {});
+
+  try {
+    const detailUrl = DETAIL_URLS[accountType];
+    if (!detailUrl) {
+      await releaseLock();
+      return { ok: false, reason: 'unknown_account_type' };
+    }
+    await appendMegaDebug({ kind: 'discover_start', accountType, tabId, detailUrl });
+    await addLog(`${accountType}: discovering cooldown via detail page`);
+
+    // Navigate same tab to detail URL. Tab is already extension-tracked from
+    // the dashboard run.
+    await chrome.tabs.update(tabId, { url: detailUrl });
+
+    // Wait for the page to commit + hydrate before polling. Detail pages
+    // hydrate Katal components on a similar timeline to the dashboard.
+    await sleep(DISCOVER_HYDRATE_DELAY_MS + Math.floor(Math.random() * 2000));
+
+    // Scrape via CDP Runtime.evaluate so we don't depend on disburse.js
+    // having sent its own result yet (it will, but timing is racy).
+    await cdpAttachWithRetry(tabId);
+
+    const start = Date.now();
+    let result = null;
+    while (Date.now() - start < DISCOVER_POLL_TIMEOUT_MS) {
+      try {
+        const evalRes = await cdpSendCommand(tabId, 'Runtime.evaluate', {
+          expression: `(() => {
+            const a = document.querySelector('.ineligibility-alert');
+            const aText = a && !a.hasAttribute('hidden') ? a.textContent.trim() : '';
+            const s = document.querySelector('.submit-payment-successful');
+            const sVis = s && !s.hasAttribute('hidden');
+            const btn = document.querySelector('kat-button[label*="Disburse"], kat-button[label*="Confirm"], kat-button[label*="Submit"]');
+            return {
+              alertText: aText,
+              successVisible: !!sVis,
+              hasDisburseButton: !!btn,
+              url: location.href
+            };
+          })()`,
+          returnByValue: true
+        });
+        const v = evalRes && evalRes.result && evalRes.result.value;
+        if (v) {
+          if (v.alertText) {
+            // Got cooldown alert text — done.
+            result = { kind: 'cooldown', alertText: v.alertText };
+            break;
+          }
+          if (v.successVisible) {
+            // Already-disbursed indicator — treat as cooldown but unknown duration.
+            result = { kind: 'already_disbursed' };
+            break;
+          }
+          if (v.hasDisburseButton) {
+            // Detail page shows a Disburse button — account is actually
+            // eligible despite dashboard saying otherwise. Surface that.
+            result = { kind: 'unexpectedly_eligible' };
+            break;
+          }
+        }
+      } catch (e) {
+        await appendMegaDebug({ kind: 'discover_eval_error', accountType, error: e.message || String(e) });
+      }
+      await sleep(DISCOVER_POLL_INTERVAL_MS);
+    }
+
+    try { await cdpDetach(tabId); } catch (_) {}
+
+    if (!result) {
+      await appendMegaDebug({ kind: 'discover_timeout', accountType });
+      await addLog(`${accountType}: discover timeout — no cooldown alert visible`, 'warn');
+      await releaseLock();
+      return { ok: false, reason: 'timeout' };
+    }
+
+    if (result.kind === 'cooldown') {
+      // Parse "X hrs Y mins" — same regex as pollPostClickResult
+      const hrsMatch = result.alertText.match(/(\d+)\s*hrs?/i);
+      const minsMatch = result.alertText.match(/(\d+)\s*mins?/i);
+      let cooldownMinutes = 0;
+      if (hrsMatch) cooldownMinutes += parseInt(hrsMatch[1], 10) * 60;
+      if (minsMatch) cooldownMinutes += parseInt(minsMatch[1], 10);
+      if (cooldownMinutes > 0) {
+        const nextEligible = Date.now() + cooldownMinutes * 60000;
+        await chrome.storage.local.set({
+          [`nextEligible_${accountType}`]: nextEligible,
+          [`lastResult_${accountType}`]: 'cooldown',
+          [`lastResultDetail_${accountType}`]: result.alertText.substring(0, 200)
+        });
+        await addLog(`${accountType}: cooldown ${cooldownMinutes} min — next eligible ${new Date(nextEligible).toLocaleString()}`);
+        await appendMegaDebug({
+          kind: 'discover_recorded',
+          accountType, cooldownMinutes, nextEligible,
+          alertSnippet: result.alertText.substring(0, 200)
+        });
+        await releaseLock();
+        return { ok: true, cooldownMinutes, nextEligible };
+      }
+      // Alert visible but couldn't parse hrs/mins — log raw text for dx
+      await appendMegaDebug({
+        kind: 'discover_unparsed',
+        accountType, alertText: result.alertText.substring(0, 300)
+      });
+      await releaseLock();
+      return { ok: false, reason: 'unparseable_alert' };
+    }
+
+    if (result.kind === 'unexpectedly_eligible') {
+      // Detail page shows a Disburse button — disagreement with dashboard.
+      // Don't auto-click; surface for next run. Could be a stale dashboard
+      // render or a refreshed eligibility window.
+      await appendMegaDebug({ kind: 'discover_unexpectedly_eligible', accountType });
+      await addLog(`${accountType}: detail page shows Disburse button — dashboard was stale, retry next run`);
+      await releaseLock();
+      return { ok: true, kind: 'unexpectedly_eligible' };
+    }
+
+    // already_disbursed — treat as a 24h placeholder cooldown so we don't
+    // re-discover every minute. Will be overwritten by exact value on the
+    // next click-through cycle.
+    await chrome.storage.local.set({
+      [`nextEligible_${accountType}`]: Date.now() + 23 * 60 * 60 * 1000,
+      [`lastResult_${accountType}`]: 'already_disbursed'
+    });
+    await appendMegaDebug({ kind: 'discover_already_disbursed', accountType });
+    await releaseLock();
+    return { ok: true, kind: 'already_disbursed' };
+  } catch (e) {
+    await appendMegaDebug({
+      kind: 'discover_failed',
+      accountType, error: e && e.message ? e.message : String(e)
+    });
+    try { await cdpDetach(tabId); } catch (_) {}
+    await releaseLock();
+    return { ok: false, reason: 'error', error: e && e.message };
+  }
+}
+
+// Run discovery sequentially across candidate accounts. runSource controls
+// trust policy: 'manual' bypasses cached cooldown (force re-discover);
+// 'heartbeat' or any other value respects cached values.
+async function runDiscoveryPass(tabId, candidates, runSource) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return;
+  const now = Date.now();
+  const cooldownData = await chrome.storage.local.get(
+    candidates.map(c => `nextEligible_${c.type}`)
+  );
+
+  for (const acct of candidates) {
+    const cached = cooldownData[`nextEligible_${acct.type}`];
+    const cachedValid = typeof cached === 'number' && isFinite(cached) && cached > now;
+    if (runSource !== 'manual' && cachedValid) {
+      const remainMin = Math.round((cached - now) / 60000);
+      await appendMegaDebug({
+        kind: 'discover_skipped',
+        reason: 'cache_valid',
+        accountType: acct.type, remainMin
+      });
+      continue;
+    }
+    await discoverCooldown(tabId, acct.type);
+    // Brief inter-account dwell so we don't hammer the page
+    await sleep(humanDelay(800, 1800));
+  }
 }
 
 // Click the Request Payment button on the dashboard, wait for navigation to
@@ -2461,7 +2676,7 @@ async function cleanupPending(accountType) {
       // R1F7: broadcast runComplete so popup can re-enable the Run Now button
       // immediately on actual completion (vs the prior 5s timeout that lied
       // about a 30-180s real run).
-      await chrome.storage.local.remove(['processingLock', 'currentRunDashboardTab', 'pendingDashboardTab']);
+      await chrome.storage.local.remove(['processingLock', 'currentRunDashboardTab', 'pendingDashboardTab', 'currentRunSource']);
       try { chrome.runtime.sendMessage({ action: 'runComplete' }); } catch (_) {}
     }
   }
@@ -2543,7 +2758,8 @@ async function runNow(opts = {}) {
     processingLock: Date.now(),
     pendingDashboardTab: tab.id,
     pendingAccountsDue: accountsDue,
-    currentRunDashboardTab: tab.id
+    currentRunDashboardTab: tab.id,
+    currentRunSource: 'manual'
   });
   await appendMegaDebug({ kind: 'dashboard_opened', tabId: tab.id, source: 'runNow', accountsDue });
 }

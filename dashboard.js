@@ -139,7 +139,7 @@
                        || balanceCell.parentElement;
 
     const btn = rowContainer ? rowContainer.querySelector('kat-button[label="Request Payment"]') : null;
-    const disabled = btn ? (btn.getAttribute('disabled') === 'true' || btn.hasAttribute('disabled')) : true;
+    const disabled = btn ? isButtonDisabled(btn) : true;
     const eligible = !disabled;
 
     let buttonRect = null;
@@ -186,6 +186,29 @@
     if (title.includes('sign in') || title.includes('sign-in')) return true;
     // Check for login form
     if (document.querySelector('#ap_email') || document.querySelector('#ap_password')) return true;
+    return false;
+  }
+
+  function isButtonDisabled(btn) {
+    // Cover the disabled-state surfaces Amazon's Katal buttons can use:
+    //   - disabled attr on the host
+    //   - disabled attr mirrored to inner <button> in shadow DOM
+    //   - aria-disabled="true" on host or inner
+    //   - CSS pointer-events:none on host or inner
+    if (!btn) return true;
+    if (btn.hasAttribute('disabled') || btn.getAttribute('disabled') === 'true') return true;
+    if (btn.getAttribute('aria-disabled') === 'true') return true;
+    try {
+      if (getComputedStyle(btn).pointerEvents === 'none') return true;
+    } catch (_) {}
+    const inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+    if (inner) {
+      if (inner.hasAttribute('disabled') || inner.getAttribute('disabled') === 'true') return true;
+      if (inner.getAttribute('aria-disabled') === 'true') return true;
+      try {
+        if (getComputedStyle(inner).pointerEvents === 'none') return true;
+      } catch (_) {}
+    }
     return false;
   }
 
