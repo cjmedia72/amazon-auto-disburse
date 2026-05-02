@@ -2199,11 +2199,17 @@ async function discoverCooldown(tabId, accountType) {
           updates[`firstDisburse_${accountType}`] = derivedLastDisburse;
         }
         await chrome.storage.local.set(updates);
+
+        // Precise retry alarm — fires at exactly ourNextEligible so we don't
+        // wait up to 30 min for the next heartbeat tick. Mirrors processResult.
+        const retryMinutes = Math.max(1, Math.round((ourNextEligible - now) / 60000));
+        chrome.alarms.create(`disburse-retry-${accountType}`, { delayInMinutes: retryMinutes });
+
         await addLog(`${accountType}: cooldown ${cooldownMinutes} min — Amazon eligible ${new Date(amazonNextEligible).toLocaleString()}, our retry +${jitterMin}m at ${new Date(ourNextEligible).toLocaleString()}; last payout ~${new Date(derivedLastDisburse).toLocaleString()}`);
         await appendMegaDebug({
           kind: 'discover_recorded',
           accountType, cooldownMinutes,
-          amazonNextEligible, ourNextEligible, jitterMin,
+          amazonNextEligible, ourNextEligible, jitterMin, retryMinutes,
           derivedLastDisburse,
           alertSnippet: result.alertText.substring(0, 200)
         });
