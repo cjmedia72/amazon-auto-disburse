@@ -2165,16 +2165,32 @@ async function discoverCooldown(tabId, accountType) {
       if (hrsMatch) cooldownMinutes += parseInt(hrsMatch[1], 10) * 60;
       if (minsMatch) cooldownMinutes += parseInt(minsMatch[1], 10);
       if (cooldownMinutes > 0) {
-        const nextEligible = Date.now() + cooldownMinutes * 60000;
-        await chrome.storage.local.set({
+        const now = Date.now();
+        const nextEligible = now + cooldownMinutes * 60000;
+        // Derive last-payout time: Amazon's per-account cooldown cycle is
+        // ~24h2m (BASE_DISBURSE_MS). lastDisburse = nextEligible - cycle.
+        // This is "good enough" for the popup's "Last payout" display on
+        // first-install — exact value gets overwritten on the next
+        // successful click-through cycle.
+        const derivedLastDisburse = new Date(nextEligible - BASE_DISBURSE_MS).toISOString();
+        const updates = {
           [`nextEligible_${accountType}`]: nextEligible,
           [`lastResult_${accountType}`]: 'cooldown',
-          [`lastResultDetail_${accountType}`]: result.alertText.substring(0, 200)
-        });
-        await addLog(`${accountType}: cooldown ${cooldownMinutes} min — next eligible ${new Date(nextEligible).toLocaleString()}`);
+          [`lastResultDetail_${accountType}`]: result.alertText.substring(0, 200),
+          [`lastDisburse_${accountType}`]: derivedLastDisburse
+        };
+        // Seed firstDisburse only if absent (preserves real first-disburse
+        // timestamp once one exists from an actual click-through).
+        const existing = await chrome.storage.local.get(`firstDisburse_${accountType}`);
+        if (!existing[`firstDisburse_${accountType}`]) {
+          updates[`firstDisburse_${accountType}`] = derivedLastDisburse;
+        }
+        await chrome.storage.local.set(updates);
+        await addLog(`${accountType}: cooldown ${cooldownMinutes} min — next eligible ${new Date(nextEligible).toLocaleString()}; last payout ~${new Date(derivedLastDisburse).toLocaleString()}`);
         await appendMegaDebug({
           kind: 'discover_recorded',
           accountType, cooldownMinutes, nextEligible,
+          derivedLastDisburse,
           alertSnippet: result.alertText.substring(0, 200)
         });
         await releaseLock();
