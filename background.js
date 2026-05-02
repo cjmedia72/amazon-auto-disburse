@@ -427,30 +427,22 @@ async function resolveCoordsViaCDP(tabId, expression) {
 }
 
 function dashboardButtonCoordExpr(rowIndex) {
-  // Row-first JIT resolution. Find ELIGIBLE rows (kat-table-row or [role="row"]
-  // or tr that contain BOTH a balance and a Request Payment button), pick the
-  // one at rowIndex, read its button. This matches the sensor-side binding
-  // in dashboard.js and is bind-by-containment, not bind-by-index — adding
-  // hidden/extra Request Payment buttons elsewhere on the page can't shift it.
+  // JIT resolution mirrored to dashboard.js sensor: anchor on
+  // .available-currency-amount (always present), walk up to the row
+  // container, find the button INSIDE that row. rowIndex is the index
+  // into balance cells, which maps to ACCOUNT_MAP order.
   return `(() => {
     try {
-      const ROW_SEL = 'kat-table-row, [role="row"], tr';
-      const all = document.querySelectorAll(ROW_SEL);
-      const eligible = [];
-      for (const r of all) {
-        if (r.querySelector('.available-currency-amount') &&
-            r.querySelector('kat-button[label="Request Payment"]')) {
-          eligible.push(r);
-        }
-      }
-      const row = eligible[${rowIndex}];
-      if (!row) return { error: 'row_not_found_at_index_' + ${rowIndex} + '_eligible_' + eligible.length };
+      const cells = document.querySelectorAll('.available-currency-amount');
+      const cell = cells[${rowIndex}];
+      if (!cell) return { error: 'balance_cell_not_found_at_index_' + ${rowIndex} };
+      const row = cell.closest('kat-table-row, [role="row"], tr') || cell.parentElement;
+      if (!row) return { error: 'row_container_not_found_for_index_' + ${rowIndex} };
       const btn = row.querySelector('kat-button[label="Request Payment"]');
-      if (!btn) return { error: 'button_not_found_for_row_' + ${rowIndex} };
+      if (!btn) return { error: 'button_not_in_row_' + ${rowIndex} + '_likely_cooldown' };
       const inner = (btn.shadowRoot && btn.shadowRoot.querySelector('button')) || btn;
       const r = inner.getBoundingClientRect();
-      const balanceCell = row.querySelector('.available-currency-amount');
-      const balanceSpan = balanceCell ? balanceCell.querySelector('span') : null;
+      const balanceSpan = cell.querySelector('span');
       return {
         x: r.left + r.width / 2,
         y: r.top + r.height / 2,

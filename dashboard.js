@@ -110,23 +110,13 @@
     return;
   }
 
-  // Bind by row, not by index. The mega-debug log proves the page uses
-  // kat-table-row → kat-table-cell. We find ELIGIBLE rows (rows that
-  // contain BOTH a balance and a Request Payment button) and read both
-  // values from inside each row. A row that has the button missing during
-  // partial hydration just gets filtered out until the next poll cycle.
-  // querySelectorAll('kat-button[...][i]') was returning the wrong button
-  // when extra Request Payment buttons exist elsewhere in the DOM.
-  const rows = await pollForEligibleRows(POLL_INTERVAL_MS, POLL_TIMEOUT_MS);
+  // Anchor on .available-currency-amount (always present even in cooldown).
+  // For each balance cell, walk UP to its row container; look for the button
+  // INSIDE the row. Button missing/disabled = ineligible, but row STILL
+  // reported so the popup can show cooldown state and balance.
+  const balanceCells = await pollForElements('.available-currency-amount', POLL_INTERVAL_MS, POLL_TIMEOUT_MS);
 
-  if (!rows || rows.length === 0) {
-    // Fall back to the legacy poll so we can still report session-expired
-    // or empty-dashboard correctly even when no row binds successfully.
-    const legacy = document.querySelectorAll('.available-currency-amount');
-    if (!legacy || legacy.length === 0) {
-      chrome.runtime.sendMessage({ action: 'dashboardResult', accounts: [] });
-      return;
-    }
+  if (!balanceCells || balanceCells.length === 0) {
     chrome.runtime.sendMessage({ action: 'dashboardResult', accounts: [] });
     return;
   }
@@ -136,14 +126,19 @@
 
   const accounts = [];
 
-  for (let i = 0; i < rows.length && i < ACCOUNT_MAP.length; i++) {
-    const row = rows[i];
-    const balanceCell = row.querySelector('.available-currency-amount');
-    const balanceEl = balanceCell ? balanceCell.querySelector('span') : null;
+  for (let i = 0; i < balanceCells.length && i < ACCOUNT_MAP.length; i++) {
+    const balanceCell = balanceCells[i];
+    const balanceEl = balanceCell.querySelector('span');
     const balanceText = balanceEl ? balanceEl.textContent.trim() : '0';
     const balance = parseFloat(balanceText.replace(/[$,]/g, '')) || 0;
 
-    const btn = row.querySelector('kat-button[label="Request Payment"]');
+    // Walk up to row container — kat-table-row / [role="row"] / tr.
+    // If we can't find one, fall back to balanceCell.parentElement so the
+    // button query still has a scope to look in.
+    const rowContainer = balanceCell.closest('kat-table-row, [role="row"], tr')
+                       || balanceCell.parentElement;
+
+    const btn = rowContainer ? rowContainer.querySelector('kat-button[label="Request Payment"]') : null;
     const disabled = btn ? (btn.getAttribute('disabled') === 'true' || btn.hasAttribute('disabled')) : true;
     const eligible = !disabled;
 
@@ -192,39 +187,6 @@
     // Check for login form
     if (document.querySelector('#ap_email') || document.querySelector('#ap_password')) return true;
     return false;
-  }
-
-  function findEligibleRows() {
-    // Mega-debug log evidence: page uses kat-table-row → kat-table-cell
-    // structure (kat-table-cell.value.transfer-account in target chain).
-    // Filter to rows that own BOTH a balance and a Request Payment button —
-    // those are the rows we can act on. Order is DOM order, which matches
-    // PAYABLE-then-INVOICING in the dashboard layout.
-    const ROW_SEL = 'kat-table-row, [role="row"], tr';
-    const all = document.querySelectorAll(ROW_SEL);
-    const eligible = [];
-    for (const row of all) {
-      if (
-        row.querySelector('.available-currency-amount') &&
-        row.querySelector('kat-button[label="Request Payment"]')
-      ) {
-        eligible.push(row);
-      }
-    }
-    return eligible;
-  }
-
-  function pollForEligibleRows(interval, timeout) {
-    return new Promise(resolve => {
-      const start = Date.now();
-      const check = () => {
-        const rows = findEligibleRows();
-        if (rows.length > 0) { resolve(rows); return; }
-        if (Date.now() - start > timeout) { resolve(null); return; }
-        setTimeout(check, interval);
-      };
-      check();
-    });
   }
 
   function pollForElements(selector, interval, timeout) {
