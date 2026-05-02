@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #1a1a2e;
+      --bg-card: #16213e;
+      --bg-input: #16213e;
+      --text: #e0e0e0;
+      --text-muted: #888;
+      --text-hint: #555;
+      --accent: #00d4aa;
+      --accent-dim: #00d4aa99;
+      --accent-ghost: #00d4aa33;
+      --accent-hover: #00d4aa22;
+      --border: #2a2a4a;
+      --border-light: #2a2a4a22;
+      --success: #00d4aa;
+      --error: #ff4757;
+      --warning: #ffa502;
+      --toggle-bg: #3d3d5c;
+      --toggle-dot: #6b6b8a;
+      --logo-bg: #1a1a2e;
+      --logo-border: #2a2a4a;
+      --logo-arrow: #00d4aa;
+      --badge-bg: #00d4aa22;
+      --badge-text: #00d4aa;
+      --badge-border: #00d4aa44;
+    }
+    body.light {
+      --bg: #f0f2f5;
+      --bg-card: #ffffff;
+      --bg-input: #ffffff;
+      --text: #1a1a2e;
+      --text-muted: #555;
+      --text-hint: #888;
+      --accent: #2563eb;
+      --accent-dim: #2563eb;
+      --accent-ghost: #2563eb22;
+      --accent-hover: #2563eb11;
+      --border: #dde1e8;
+      --border-light: #dde1e822;
+      --success: #16a34a;
+      --error: #dc2626;
+      --warning: #ea580c;
+      --toggle-bg: #cbd5e1;
+      --toggle-dot: #94a3b8;
+      --logo-bg: #fff;
+      --logo-border: #dde1e8;
+      --logo-arrow: #ff9900;
+      --badge-bg: #2563eb18;
+      --badge-text: #2563eb;
+      --badge-border: #2563eb40;
+    }
+    body {
+      width: 360px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 0;
+      transition: background 0.2s, color 0.2s;
+      /* Hide scrollbar while keeping scroll behavior */
+      scrollbar-width: none; /* Firefox */
+      -ms-overflow-style: none; /* IE/Edge legacy */
+    }
+    body::-webkit-scrollbar { display: none; } /* Chrome / Safari / Edge */
+    /* Apply to any internal scrollers too */
+    .log-section::-webkit-scrollbar,
+    .settings-panel::-webkit-scrollbar,
+    .history-body::-webkit-scrollbar { display: none; }
+    .log-section, .settings-panel, .history-body {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    .logo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: var(--logo-bg);
+      border-bottom: 1px solid var(--logo-border);
+    }
+    .logo-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo-icon {
+      width: 32px;
+      height: 32px;
+      position: relative;
+    }
+    .logo-icon svg { width: 32px; height: 32px; }
+    .logo-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.3px;
+    }
+    .logo-badge {
+      font-size: 10px;
+      font-weight: 600;
+      background: var(--badge-bg);
+      color: var(--badge-text);
+      border: 1px solid var(--badge-border);
+      border-radius: 10px;
+      padding: 2px 8px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .theme-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      padding: 4px 8px;
+      font-size: 16px;
+      line-height: 1;
+      color: var(--text-muted);
+      transition: 0.2s;
+    }
+    .theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .content { padding: 12px 16px 16px; }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .status-row:last-child { border-bottom: none; }
+    .label { color: var(--text-muted); }
+    .value { color: var(--text); font-weight: 500; }
+    .value.success { color: var(--success); }
+    .value.error { color: var(--error); }
+    .value.cooldown { color: var(--warning); }
+    .value.no_button { color: var(--warning); }
+    .value.unknown { color: var(--warning); }
+    .value.click_failed { color: var(--error); }
+    .value.nav_timeout { color: var(--error); }
+    .value.url_mismatch { color: var(--error); }
+    .value.active { color: var(--success); }
+    .value.disabled { color: var(--error); }
+    .section {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 10px;
+      background: var(--bg-card);
+    }
+    .section-label {
+      font-size: 11px;
+      color: var(--accent-dim);
+      font-weight: 700;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .toggle-wrap {
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .toggle-label { font-size: 12px; color: var(--text-muted); }
+    .toggle {
+      position: relative;
+      width: 44px;
+      height: 22px;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: var(--toggle-bg);
+      border-radius: 22px;
+      transition: 0.3s;
+    }
+    .slider:before {
+      content: "";
+      position: absolute;
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background: var(--toggle-dot);
+      border-radius: 50%;
+      transition: 0.3s;
+    }
+    input:checked + .slider { background: var(--accent); }
+    input:checked + .slider:before { transform: translateX(22px); background: #fff; }
+    .select-styled {
+      background: var(--bg-input);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 6px;
+      font-size: 11px;
+      cursor: pointer;
+      width: 68px;
+    }
+    .tip-wrap {
+      position: relative;
+      display: inline-block;
+      margin-left: 4px;
+    }
+    .tip-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent-ghost);
+      border: 1px solid var(--accent);
+      font-size: 9px;
+      font-weight: 700;
+      color: var(--accent);
+      cursor: help;
+      vertical-align: middle;
+    }
+    .tip-text {
+      display: none;
+      position: absolute;
+      bottom: 22px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 11px;
+      font-weight: 500;
+      width: 220px;
+      line-height: 1.5;
+      z-index: 10;
+      text-align: center;
+    }
+    .tip-text::after {
+      content: "";
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: var(--accent);
+    }
+    .tip-wrap:hover .tip-text { display: block; }
+    .btn {
+      margin-top: 14px;
+      width: 100%;
+      padding: 10px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:active { transform: scale(0.98); }
+    .log-section {
+      margin-top: 14px;
+      max-height: 140px;
+      overflow-y: auto;
+      font-size: 11px;
+      border-top: 1px solid var(--border);
+      padding-top: 8px;
+    }
+    .log-entry {
+      padding: 3px 0;
+      border-bottom: 1px solid var(--border-light);
+      color: var(--text-muted);
+    }
+    .log-entry .time { color: var(--text-hint); }
+    .log-entry.success .result { color: var(--success); }
+    .log-entry.error .result { color: var(--error); }
+    .log-entry.cooldown .result { color: var(--warning); }
+    .log-entry.no_button .result { color: var(--warning); }
+
+    /* Settings panel overlay */
+    .settings-panel {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: 100;
+      overflow-y: auto;
+      padding: 12px 16px 16px;
+    }
+    .settings-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .settings-back {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .settings-back:hover { border-color: var(--accent); color: var(--accent); }
+    .settings-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .gear-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      padding: 4px 8px;
+      font-size: 14px;
+      line-height: 1;
+      color: var(--text-muted);
+      transition: 0.2s;
+      margin-right: 6px;
+    }
+    .gear-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .history-toggle, .breakdown-toggle {
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .history-toggle:hover, .breakdown-toggle:hover { opacity: 0.85; }
+    .breakdown-toggle {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: none;
+      font-weight: 500;
+      letter-spacing: normal;
+    }
+    .history-chevron {
+      font-size: 9px;
+      display: inline-block;
+      transition: transform 0.15s;
+      width: 10px;
+    }
+    .history-chevron.open { transform: rotate(0deg); } /* ▾ via text swap, no rotate needed */
+    .hist-amount { color: var(--success); font-weight: 600; }
+    .hist-count { color: var(--text-hint); font-size: 10px; margin-left: 8px; }
+    .breakdown-account-label {
+      font-size: 10px;
+      color: var(--accent-dim);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-top: 4px;
+      padding-top: 4px;
+      border-top: 1px solid var(--border-light);
+    }
+    .breakdown-account-label:first-child { border-top: none; padding-top: 0; }
+    .breakdown-indent { padding-left: 8px; }
+    .history-clear-row {
+      margin-top: 10px;
+      text-align: right;
+    }
+    .history-clear-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 10px;
+      cursor: pointer;
+      padding: 2px 4px;
+      text-decoration: underline;
+    }
+    .history-clear-btn:hover { color: var(--error); }
+  </style>
+</head>
+<body>
+  <div class="logo-bar">
+    <div class="logo-left">
+      <div class="logo-icon">
+        <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+          <rect width="32" height="32" rx="7" fill="#232f3e"/>
+          <path d="M8 20 Q16 24 24 20" stroke="#ff9900" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+          <path d="M22 19 L24 20 L22.5 21.5" stroke="#ff9900" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="16" y="17" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="13" font-weight="700" fill="white">a</text>
+        </svg>
+      </div>
+      <span class="logo-title">AutoDisburse</span>
+      <span class="logo-badge" id="versionBadge">v1.0</span>
+    </div>
+    <div>
+      <button class="gear-btn" id="settingsBtn" title="Settings">&#9881;</button>
+      <button class="theme-btn" id="themeBtn" title="Toggle light/dark mode">&#9788;</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="status-row">
+      <span class="label">Status</span>
+      <span class="value" id="status">Loading...</span>
+    </div>
+    <div class="status-row">
+      <span class="label">Next Check</span>
+      <span class="value" id="nextCheck">--</span>
+    </div>
+    <div class="status-row">
+      <span class="label">Total Runs</span>
+      <span class="value" id="runCount">0</span>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Standard Orders (Payable)</div>
+      <div class="status-row">
+        <span class="label">Last Disbursement</span>
+        <span class="value" id="payableLast">--</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Last Payout</span>
+        <span class="value" id="payableAmount">--</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Last Result</span>
+        <span class="value" id="payableResult">--</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Invoiced Orders (Invoicing)</div>
+      <div class="status-row">
+        <span class="label">Last Disbursement</span>
+        <span class="value" id="invoicingLast">--</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Last Payout</span>
+        <span class="value" id="invoicingAmount">--</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Last Result</span>
+        <span class="value" id="invoicingResult">--</span>
+      </div>
+    </div>
+
+    <div class="section history-section">
+      <div class="section-label history-toggle" id="historyToggle">
+        <span class="history-chevron" id="historyChevron">▸</span>
+        <span>Disbursement History</span>
+      </div>
+      <div class="history-body" id="historyBody" style="display:none;">
+        <div class="status-row">
+          <span class="label">All Time</span>
+          <span class="value">
+            <span class="hist-amount" id="histAllTimeAmount">$0.00</span>
+            <span class="hist-count" id="histAllTimeCount">0×</span>
+          </span>
+        </div>
+        <div class="status-row">
+          <span class="label">Last 30 Days</span>
+          <span class="value">
+            <span class="hist-amount" id="hist30dAmount">$0.00</span>
+            <span class="hist-count" id="hist30dCount">0×</span>
+          </span>
+        </div>
+        <div class="status-row">
+          <span class="label">Last 7 Days</span>
+          <span class="value">
+            <span class="hist-amount" id="hist7dAmount">$0.00</span>
+            <span class="hist-count" id="hist7dCount">0×</span>
+          </span>
+        </div>
+
+        <div class="breakdown-toggle" id="breakdownToggle">
+          <span class="history-chevron" id="breakdownChevron">▸</span>
+          <span>Breakdown by account</span>
+        </div>
+        <div class="breakdown-body" id="breakdownBody" style="display:none;">
+          <div class="breakdown-account-label">Standard Orders (Payable)</div>
+          <div class="status-row">
+            <span class="label breakdown-indent">All Time</span>
+            <span class="value">
+              <span class="hist-amount" id="histPayableAllTimeAmount">$0.00</span>
+              <span class="hist-count" id="histPayableAllTimeCount">0×</span>
+            </span>
+          </div>
+          <div class="status-row">
+            <span class="label breakdown-indent">Last 30 Days</span>
+            <span class="value">
+              <span class="hist-amount" id="histPayable30dAmount">$0.00</span>
+              <span class="hist-count" id="histPayable30dCount">0×</span>
+            </span>
+          </div>
+          <div class="status-row">
+            <span class="label breakdown-indent">Last 7 Days</span>
+            <span class="value">
+              <span class="hist-amount" id="histPayable7dAmount">$0.00</span>
+              <span class="hist-count" id="histPayable7dCount">0×</span>
+            </span>
+          </div>
+
+          <div class="breakdown-account-label" style="margin-top:10px;">Invoiced Orders (Invoicing)</div>
+          <div class="status-row">
+            <span class="label breakdown-indent">All Time</span>
+            <span class="value">
+              <span class="hist-amount" id="histInvoicingAllTimeAmount">$0.00</span>
+              <span class="hist-count" id="histInvoicingAllTimeCount">0×</span>
+            </span>
+          </div>
+          <div class="status-row">
+            <span class="label breakdown-indent">Last 30 Days</span>
+            <span class="value">
+              <span class="hist-amount" id="histInvoicing30dAmount">$0.00</span>
+              <span class="hist-count" id="histInvoicing30dCount">0×</span>
+            </span>
+          </div>
+          <div class="status-row">
+            <span class="label breakdown-indent">Last 7 Days</span>
+            <span class="value">
+              <span class="hist-amount" id="histInvoicing7dAmount">$0.00</span>
+              <span class="hist-count" id="histInvoicing7dCount">0×</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="history-clear-row">
+          <button class="history-clear-btn" id="historyClearBtn">Clear History</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toggle-wrap">
+      <span class="toggle-label">Auto Disburse<span class="tip-wrap"><span class="tip-icon">?</span><span class="tip-text">Automatically requests your available Amazon funds every 24 hours so you get paid faster</span></span></span>
+      <label class="toggle">
+        <input type="checkbox" id="enableToggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-wrap" style="margin-top: 8px;">
+      <span class="toggle-label">Smart Delay<span class="tip-wrap"><span class="tip-icon">?</span><span class="tip-text">Picks a random 2–8 min delay weighted against your last 5 runs so timing never repeats a pattern</span></span></span>
+      <label class="toggle">
+        <input type="checkbox" id="smartDelayToggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-wrap" style="margin-top: 8px;" id="jitterWrap">
+      <span class="toggle-label">Delay After Cooldown<span class="tip-wrap"><span class="tip-icon">?</span><span class="tip-text">Extra minutes to wait after Amazon's 24hr cooldown expires before retrying</span></span></span>
+      <select id="jitterSelect" class="select-styled">
+        <option value="2">2 min</option>
+        <option value="3">3 min</option>
+        <option value="4">4 min</option>
+        <option value="5" selected>5 min</option>
+        <option value="7">7 min</option>
+        <option value="10">10 min</option>
+        <option value="15">15 min</option>
+        <option value="20">20 min</option>
+        <option value="30">30 min</option>
+        <option value="45">45 min</option>
+        <option value="60">60 min</option>
+      </select>
+    </div>
+
+    <button class="btn" id="runNow">Run Now</button>
+
+    <div class="log-section" id="logSection"></div>
+  </div>
+
+  <!-- Settings Panel Overlay -->
+  <div id="settingsPanel" class="settings-panel" style="display:none;">
+    <div class="settings-header">
+      <button class="settings-back" id="settingsBack" title="Back">&#8592;</button>
+      <span class="settings-title">Settings</span>
+    </div>
+
+    <div class="toggle-wrap">
+      <span class="toggle-label">Developer Mode<span class="tip-wrap"><span class="tip-icon">?</span><span class="tip-text">Enables forensic logging, mainworld observation hooks, network telemetry, and the mega-debug log viewer. Requests webRequest + downloads permissions when enabled. Reload any open Amazon Seller Central tabs after enabling for hooks to take effect. Toggling off then on requires a page reload to restore observation in the same tab. Adds detection surface that may be visible to anti-bot scripts. Development use only.</span></span></span>
+      <label class="toggle">
+        <input type="checkbox" id="debugModeToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="section" id="megaDebugSection" style="display:none;">
+      <div class="section-label">Mega-Debug Log</div>
+      <div class="status-row">
+        <span class="label">Total Entries</span>
+        <span class="value" id="megaTotal">0</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Main-world Hooks</span>
+        <span class="value" id="megaMainworld">0</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Network Requests</span>
+        <span class="value" id="megaNetwork">0</span>
+      </div>
+      <div class="status-row">
+        <span class="label">CDP Events</span>
+        <span class="value" id="megaCdp">0</span>
+      </div>
+      <div style="display:flex; gap:6px; margin-top:8px;">
+        <button class="btn" id="downloadMegaJson" style="margin-top:0; flex:1; padding:7px; font-size:11px;">Download JSON</button>
+        <button class="btn" id="downloadMegaCsv" style="margin-top:0; flex:1; padding:7px; font-size:11px; background:transparent; border:1px solid var(--border); color:var(--text-muted);">Download CSV</button>
+        <button class="btn" id="clearMega" style="margin-top:0; padding:7px 10px; font-size:11px; background:transparent; border:1px solid var(--border); color:var(--text-muted);">Clear</button>
+      </div>
+      <div style="display:flex; gap:6px; margin-top:6px;">
+        <button class="btn" id="toggleMegaInline" style="margin-top:0; flex:1; padding:7px; font-size:11px; background:transparent; border:1px solid var(--border); color:var(--text-muted);">Show Inline Log</button>
+        <button class="btn" id="copyMega" style="margin-top:0; flex:1; padding:7px; font-size:11px; background:transparent; border:1px solid var(--border); color:var(--text-muted);">Copy All</button>
+      </div>
+      <textarea id="megaInlineLog" readonly style="display:none; width:100%; height:240px; margin-top:8px; font-family:'Consolas',monospace; font-size:10px; background:var(--bg-input); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px; resize:vertical; white-space:pre; overflow:auto;" placeholder="Mega-debug log will appear here..."></textarea>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
