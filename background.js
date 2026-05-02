@@ -426,22 +426,39 @@ async function resolveCoordsViaCDP(tabId, expression) {
   }
 }
 
-function dashboardButtonCoordExpr(buttonIndex) {
-  // Re-find the Request Payment button at the given row index, resolve through
-  // the Katal shadow DOM, return its current viewport-relative center rect.
+function dashboardButtonCoordExpr(rowIndex) {
+  // Row-first JIT resolution. Find ELIGIBLE rows (kat-table-row or [role="row"]
+  // or tr that contain BOTH a balance and a Request Payment button), pick the
+  // one at rowIndex, read its button. This matches the sensor-side binding
+  // in dashboard.js and is bind-by-containment, not bind-by-index — adding
+  // hidden/extra Request Payment buttons elsewhere on the page can't shift it.
   return `(() => {
     try {
-      const btns = document.querySelectorAll('kat-button[label="Request Payment"]');
-      const btn = btns[${buttonIndex}];
-      if (!btn) return { error: 'button_not_found_at_index_' + ${buttonIndex} };
+      const ROW_SEL = 'kat-table-row, [role="row"], tr';
+      const all = document.querySelectorAll(ROW_SEL);
+      const eligible = [];
+      for (const r of all) {
+        if (r.querySelector('.available-currency-amount') &&
+            r.querySelector('kat-button[label="Request Payment"]')) {
+          eligible.push(r);
+        }
+      }
+      const row = eligible[${rowIndex}];
+      if (!row) return { error: 'row_not_found_at_index_' + ${rowIndex} + '_eligible_' + eligible.length };
+      const btn = row.querySelector('kat-button[label="Request Payment"]');
+      if (!btn) return { error: 'button_not_found_for_row_' + ${rowIndex} };
       const inner = (btn.shadowRoot && btn.shadowRoot.querySelector('button')) || btn;
       const r = inner.getBoundingClientRect();
+      const balanceCell = row.querySelector('.available-currency-amount');
+      const balanceSpan = balanceCell ? balanceCell.querySelector('span') : null;
       return {
         x: r.left + r.width / 2,
         y: r.top + r.height / 2,
         width: r.width,
         height: r.height,
-        disabled: btn.hasAttribute('disabled') || btn.getAttribute('disabled') === 'true'
+        disabled: btn.hasAttribute('disabled') || btn.getAttribute('disabled') === 'true',
+        rowText: balanceSpan ? balanceSpan.textContent.trim() : '',
+        rowTag: row.tagName.toLowerCase()
       };
     } catch (e) { return { error: String(e) }; }
   })()`;
@@ -675,7 +692,13 @@ async function performCDPClick(tabId, x, y, opts = {}) {
       const live = await resolveCoordsViaCDP(tabId, opts.coordExpr);
       if (live && !live.error && live.x && live.y) {
         if (Math.abs(live.x - x) > 5 || Math.abs(live.y - y) > 5) {
-          appendMegaDebug({ kind: 'cdp_coords_drifted', from: { x, y }, to: { x: live.x, y: live.y } });
+          appendMegaDebug({
+            kind: 'cdp_coords_drifted',
+            from: { x, y },
+            to: { x: live.x, y: live.y },
+            rowText: live.rowText || '',
+            rowTag: live.rowTag || ''
+          });
         }
         x = live.x;
         y = live.y;
@@ -759,6 +782,278 @@ async function performCDPClick(tabId, x, y, opts = {}) {
     if (navPromise) { try { await navPromise; } catch (_) {} }
     try { await cdpDetach(tabId); } catch (_) {}
     return false;
+  }
+}
+
+// Build an elementFromPoint verification expression. Walks up from the topmost
+// element at (x, y) through the parent chain INCLUDING shadow root crossings
+// (parent.parentNode.host) to test a predicate. Returns { matches, actualTag,
+// actualClass, host }. Matches if any ancestor satisfies predicateBody.
+function buildElementFromPointVerifyExpr(x, y, predicateBody) {
+  return `(() => {
+    try {
+      const _x = ${Math.round(x)}, _y = ${Math.round(y)};
+      const el = document.elementFromPoint(_x, _y);
+      if (!el) return { matches: false, error: 'no_element_at_point' };
+      let p = el;
+      let matches = false;
+      let host = '';
+      let depth = 0;
+      while (p && p !== document && depth < 30) {
+        if (p.nodeType === 1) {
+          if (!host && p.tagName && p.tagName.indexOf('-') > 0) {
+            const lbl = p.getAttribute && p.getAttribute('label');
+            host = p.tagName.toLowerCase() + (lbl ? '[label="' + lbl + '"]' : '');
+          }
+          try { if ((${predicateBody})(p)) { matches = true; break; } } catch (_) {}
+        }
+        if (p.parentNode && p.parentNode.host) p = p.parentNode.host;
+        else if (p.parentElement) p = p.parentElement;
+        else p = p.parentNode;
+        depth++;
+      }
+      return {
+        matches,
+        actualTag: el.tagName ? el.tagName.toLowerCase() : '',
+        actualClass: typeof el.className === 'string' ? el.className : '',
+        host
+      };
+    } catch (e) { return { matches: false, error: String(e) }; }
+  })()`;
+}
+
+// Bulletproof CDP click — Playwright-pattern click pipeline. Stages each
+// verifiable, each fails loud with diagnostics. Designed for ACTION clicks
+// (dashboard Request Payment, detail-page Disburse, etc.) where landing on
+// the right element is dispositive. Use performCDPClick for presence/scan
+// moves where this rigor is overkill.
+//
+// opts:
+//   selectorExpr    - JS expr returning { x, y, width, height, error?, disabled? }
+//                     for the target element's center rect
+//   matchPredicate  - JS function-body string: (el) => bool — tests whether
+//                     elementFromPoint result (or any ancestor crossing shadow
+//                     boundaries) is the expected target
+//   label           - diagnostic label for cdp_stage entries
+//   skipPagePresence, awaitNavigation, navigationTimeoutMs, keepAttached - same
+//                     semantics as performCDPClick
+//
+// Returns: { ok, stage?, error?, host?, navResult? }
+async function bulletproofCDPClick(tabId, opts) {
+  const label = opts.label || 'unknown';
+  let stage = 'init';
+  let navPromise = null;
+
+  try {
+    stage = 'prepare_tab';
+    const ready = await prepareTabForCDP(tabId);
+    if (!ready) throw new Error('tab_not_ready');
+
+    stage = 'attach';
+    appendMegaDebug({ kind: 'cdp_stage', stage: 'bp_attach_attempt', tabId, label });
+    await cdpAttachWithRetry(tabId);
+    appendMegaDebug({ kind: 'cdp_stage', stage: 'bp_attach_succeeded', tabId, label });
+    clearSafetyTimeout(tabId, 'cdp_attached');
+
+    // STAGE 1 — Acquire: resolve element rect via selectorExpr
+    stage = 'acquire';
+    let rect = await resolveCoordsViaCDP(tabId, opts.selectorExpr);
+    if (!rect || rect.error || !rect.x || !rect.y) {
+      appendMegaDebug({
+        kind: 'cdp_stage', stage: 'bp_acquire_failed',
+        tabId, label, error: (rect && rect.error) || 'no_rect'
+      });
+      throw new Error('acquire_failed: ' + ((rect && rect.error) || 'no_rect'));
+    }
+    if (rect.disabled) {
+      appendMegaDebug({ kind: 'cdp_stage', stage: 'bp_acquire_disabled', tabId, label });
+      throw new Error('element_disabled');
+    }
+    appendMegaDebug({
+      kind: 'cdp_stage', stage: 'bp_acquired',
+      tabId, label, coords: { x: rect.x, y: rect.y },
+      rowText: rect.rowText || '', rowTag: rect.rowTag || ''
+    });
+
+    // STAGE 2 — Settle: re-read rect until stable across two consecutive reads
+    stage = 'settle';
+    const SETTLE_TOL = 2;
+    const SETTLE_MAX_LOOPS = 12;
+    let settleLoops = 0;
+    for (let i = 0; i < SETTLE_MAX_LOOPS; i++) {
+      await sleep(humanDelay(80, 140));
+      const r2 = await resolveCoordsViaCDP(tabId, opts.selectorExpr);
+      if (!r2 || r2.error || !r2.x || !r2.y) {
+        appendMegaDebug({
+          kind: 'cdp_stage', stage: 'bp_settle_lost_element',
+          tabId, label, loop: i, error: (r2 && r2.error) || 'no_rect'
+        });
+        throw new Error('settle_lost_element');
+      }
+      const dx = Math.abs(r2.x - rect.x);
+      const dy = Math.abs(r2.y - rect.y);
+      settleLoops = i + 1;
+      if (dx <= SETTLE_TOL && dy <= SETTLE_TOL) { rect = r2; break; }
+      rect = r2;
+      if (i === SETTLE_MAX_LOOPS - 1) {
+        appendMegaDebug({
+          kind: 'cdp_stage', stage: 'bp_settle_never_stable',
+          tabId, label, lastDelta: { dx, dy }
+        });
+      }
+    }
+    appendMegaDebug({
+      kind: 'cdp_stage', stage: 'bp_settled',
+      tabId, label, loops: settleLoops, coords: { x: rect.x, y: rect.y }
+    });
+
+    // STAGE 3 — Pre-hover verify via elementFromPoint
+    stage = 'verify_pre_hover';
+    const predicate = opts.matchPredicate || '(el) => true';
+    // resolveCoordsViaCDP rejects non-rect-shape responses, so do a thin eval
+    // for the verify path. Closure reads current rect.x/rect.y at call time —
+    // safe across the post-hover re-acquire that mutates `rect`.
+    const evalVerify = async () => {
+      try {
+        const result = await cdpSendCommand(tabId, 'Runtime.evaluate', {
+          expression: buildElementFromPointVerifyExpr(rect.x, rect.y, predicate),
+          returnByValue: true
+        });
+        return result && result.result && result.result.value;
+      } catch (e) { return { matches: false, error: e.message || String(e) }; }
+    };
+    let verify = await evalVerify();
+    if (!verify || !verify.matches) {
+      appendMegaDebug({
+        kind: 'cdp_stage', stage: 'bp_verify_pre_hover_failed',
+        tabId, label, coords: { x: rect.x, y: rect.y },
+        actualTag: verify && verify.actualTag,
+        actualClass: verify && verify.actualClass,
+        host: verify && verify.host,
+        error: verify && verify.error
+      });
+      throw new Error('overlay_pre_hover: actual=' + (verify && verify.actualTag) + ' host=' + (verify && verify.host));
+    }
+    appendMegaDebug({
+      kind: 'cdp_stage', stage: 'bp_verify_pre_hover_passed',
+      tabId, label, host: verify.host
+    });
+
+    // STAGE 4 — Page presence (long human sim) before approach
+    if (!opts.skipPagePresence) {
+      stage = 'page_presence';
+      await simulatePagePresence(tabId, rect.x, rect.y);
+    } else {
+      stage = 'page_presence_skipped';
+      const startX = rect.x + humanDelay(-180, 180);
+      const startY = rect.y + humanDelay(-100, 100);
+      await cdpMouseEvent(tabId, 'mouseMoved', startX, startY);
+      await sleep(humanDelay(150, 350));
+      const path = curvedPath(startX, startY, rect.x, rect.y, 4 + Math.floor(Math.random() * 3));
+      for (const pt of path) {
+        await cdpMouseEvent(tabId, 'mouseMoved', pt.x, pt.y);
+        await sleep(humanDelay(60, 160));
+      }
+    }
+
+    stage = 'ambient';
+    await injectAmbientEvents(tabId, rect.x, rect.y);
+
+    // STAGE 5 — Hover at locked center
+    stage = 'hover';
+    await cdpMouseEvent(tabId, 'mouseMoved', rect.x, rect.y);
+    await sleep(humanDelay(60, 140));
+
+    // STAGE 6 — Re-acquire (capture :hover-induced shifts)
+    stage = 'reacquire';
+    const rectPostHover = await resolveCoordsViaCDP(tabId, opts.selectorExpr);
+    if (rectPostHover && !rectPostHover.error && rectPostHover.x && rectPostHover.y) {
+      const dx = Math.abs(rectPostHover.x - rect.x);
+      const dy = Math.abs(rectPostHover.y - rect.y);
+      if (dx > SETTLE_TOL || dy > SETTLE_TOL) {
+        appendMegaDebug({
+          kind: 'cdp_stage', stage: 'bp_hover_shifted',
+          tabId, label,
+          before: { x: rect.x, y: rect.y },
+          after: { x: rectPostHover.x, y: rectPostHover.y }
+        });
+        rect = rectPostHover;
+        await cdpMouseEvent(tabId, 'mouseMoved', rect.x, rect.y);
+        await sleep(humanDelay(40, 100));
+      }
+    }
+
+    // STAGE 7 — Final pre-click verify
+    stage = 'verify_pre_click';
+    verify = await evalVerify();
+    if (!verify || !verify.matches) {
+      appendMegaDebug({
+        kind: 'cdp_stage', stage: 'bp_verify_pre_click_failed',
+        tabId, label, coords: { x: rect.x, y: rect.y },
+        actualTag: verify && verify.actualTag,
+        actualClass: verify && verify.actualClass,
+        host: verify && verify.host
+      });
+      throw new Error('overlay_pre_click: actual=' + (verify && verify.actualTag) + ' host=' + (verify && verify.host));
+    }
+    appendMegaDebug({
+      kind: 'cdp_stage', stage: 'bp_verify_pre_click_passed',
+      tabId, label, coords: { x: rect.x, y: rect.y }, host: verify.host
+    });
+
+    // STAGE 8 — Arm nav listener if requested (right before press so timeout
+    // window only covers post-click → page commit time)
+    if (opts.awaitNavigation) {
+      navPromise = waitForNavigation(tabId, opts.navigationTimeoutMs || 20000);
+      appendMegaDebug({
+        kind: 'cdp_stage', stage: 'bp_nav_listener_armed',
+        tabId, label, timeoutMs: opts.navigationTimeoutMs || 20000
+      });
+    }
+
+    // STAGE 9 — Press
+    stage = 'press';
+    await cdpMouseEvent(tabId, 'mousePressed', rect.x, rect.y, { button: 'left', clickCount: 1 });
+    await sleep(humanDelay(40, 90));
+    stage = 'release';
+    await cdpMouseEvent(tabId, 'mouseReleased', rect.x, rect.y, { button: 'left', clickCount: 1 });
+
+    appendMegaDebug({
+      kind: 'cdp_stage', stage: 'bp_click_dispatched',
+      tabId, label, coords: { x: rect.x, y: rect.y }, host: verify.host
+    });
+
+    await sleep(humanDelay(200, 500));
+
+    if (!opts.keepAttached) {
+      stage = 'detach';
+      await cdpDetach(tabId);
+    }
+    appendMegaDebug({
+      kind: 'cdp_stage', stage: 'bp_click_complete',
+      tabId, label, keptAttached: !!opts.keepAttached
+    });
+
+    if (navPromise) {
+      const navResult = await navPromise;
+      appendMegaDebug({
+        kind: 'cdp_stage', stage: 'bp_nav_resolved',
+        tabId, label, url: navResult.url, timedOut: navResult.timedOut
+      });
+      return { ok: true, host: verify.host, navResult };
+    }
+    if (opts.keepAttached) return { ok: true, host: verify.host };
+    return { ok: true, host: verify.host };
+  } catch (e) {
+    const errMsg = e && e.message ? e.message : String(e);
+    await addLog(`bulletproof click failed at ${stage}: ${errMsg}`, 'error');
+    appendMegaDebug({
+      kind: 'cdp_stage', stage: 'bp_failed_at_' + stage,
+      tabId, label, error: errMsg
+    });
+    if (navPromise) { try { await navPromise; } catch (_) {} }
+    try { await cdpDetach(tabId); } catch (_) {}
+    return { ok: false, stage, error: errMsg };
   }
 }
 
@@ -1783,18 +2078,17 @@ async function processDashboardClick(tabId, acct) {
   // Activate the tab briefly so visibility state is normalized
   await activateTabBriefly(tabId);
 
-  // JIT coord re-resolution at click time — protects against page reflow
-  // between dashboard.js's measurement and our click. Pass the button index
-  // so we re-find the right row.
-  const buttonIndex = typeof acct.buttonIndex === 'number' ? acct.buttonIndex : 0;
-  // Full page presence on the dashboard — same human-like treatment the detail
-  // page gets. The dashboard is the first surface Amazon's behavior detectors
-  // see in this run, so we want a real session signature here too.
-  // awaitNavigation: performCDPClick installs the navigation listener right
-  // before press so the 20s timeout only covers post-click → page commit time
-  // (not the 5–15s human-presence sim that runs first).
-  const clickRes = await performCDPClick(tabId, acct.buttonRect.x, acct.buttonRect.y, {
-    coordExpr: dashboardButtonCoordExpr(buttonIndex),
+  // Bulletproof click pipeline. Stages: acquire → settle → verify-pre-hover
+  // → page presence → hover → re-acquire → verify-pre-click → press/release.
+  // Pre-click verify uses elementFromPoint to confirm the topmost element at
+  // dispatch coords is (or contains) a kat-button[label="Request Payment"].
+  // If an overlay/banner/cell intercepts the position, we abort BEFORE press.
+  const rowIndex = typeof acct.rowIndex === 'number' ? acct.rowIndex
+                  : (typeof acct.buttonIndex === 'number' ? acct.buttonIndex : 0);
+  const clickRes = await bulletproofCDPClick(tabId, {
+    selectorExpr: dashboardButtonCoordExpr(rowIndex),
+    matchPredicate: `(p) => p && p.tagName === 'KAT-BUTTON' && p.getAttribute && p.getAttribute('label') === 'Request Payment'`,
+    label: 'dashboard_' + acct.type.toLowerCase(),
     awaitNavigation: true,
     navigationTimeoutMs: 20000
   });
