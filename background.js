@@ -2659,15 +2659,29 @@ async function processResult(accountType, status, detail, cooldownMinutes, confi
       const { jitterMaxMinutes: jMaxCd = 5 } = await chrome.storage.local.get('jitterMaxMinutes');
       jitterMinCd = 2 + Math.floor(Math.random() * Math.max(1, jMaxCd - 1));
     }
-    const nextEligible = Date.now() + cooldownMs + (jitterMinCd * 60000);
-    const retryMinutes = Math.round((cooldownMs + (jitterMinCd * 60000)) / 60000);
+    const nowMs = Date.now();
+    const amazonNextEligible = nowMs + cooldownMs;
+    const nextEligible = amazonNextEligible + (jitterMinCd * 60000);
+    const retryMinutes = Math.round((nextEligible - nowMs) / 60000);
 
-    await chrome.storage.local.set({
+    // Derive last-payout from Amazon's truth (cooldown is exactly 24h).
+    // Click-through cooldown branch was missing this — popup showed "--"
+    // for last payout when the click navigated to a cooldown detail page.
+    const AMAZON_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+    const derivedLastDisburse = new Date(amazonNextEligible - AMAZON_COOLDOWN_MS).toISOString();
+
+    const cooldownUpdates = {
       [`lastResult_${accountType}`]: 'cooldown',
       [`lastResultDetail_${accountType}`]: detail || `Cooldown: ${cooldownMinutes} min`,
       [`cooldown_${accountType}`]: cooldownMinutes,
-      [`nextEligible_${accountType}`]: nextEligible
-    });
+      [`nextEligible_${accountType}`]: nextEligible,
+      [`lastDisburse_${accountType}`]: derivedLastDisburse
+    };
+    const existingFirst = await chrome.storage.local.get(`firstDisburse_${accountType}`);
+    if (!existingFirst[`firstDisburse_${accountType}`]) {
+      cooldownUpdates[`firstDisburse_${accountType}`] = derivedLastDisburse;
+    }
+    await chrome.storage.local.set(cooldownUpdates);
 
     chrome.alarms.create(`disburse-retry-${accountType}`, { delayInMinutes: retryMinutes });
     await addLog(`${accountType}: COOLDOWN — retry in ${retryMinutes} min. ${detail || ''}`, 'cooldown');
