@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Amazon Auto Disburse",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Automatically requests Amazon disbursement every 24 hours",
   "minimum_chrome_version": "111",
   "permissions": [

@@ -2166,34 +2166,49 @@ async function discoverCooldown(tabId, accountType) {
       if (minsMatch) cooldownMinutes += parseInt(minsMatch[1], 10);
       if (cooldownMinutes > 0) {
         const now = Date.now();
-        const nextEligible = now + cooldownMinutes * 60000;
-        // Derive last-payout time: Amazon's actual cooldown is exactly 24h.
-        // (BASE_DISBURSE_MS includes our 2-minute scheduling buffer — that's
-        // for OUR retry timing, not for deriving Amazon's last-payout time.)
         const AMAZON_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-        const derivedLastDisburse = new Date(nextEligible - AMAZON_COOLDOWN_MS).toISOString();
+
+        // Amazon's truth: when their cooldown ends.
+        const amazonNextEligible = now + cooldownMinutes * 60000;
+        // Derive last-payout from Amazon's truth, NOT from our scheduled
+        // retry time. amazon_cooldown is exactly 24h, so:
+        //   lastDisburse = amazonNextEligible - 24h
+        const derivedLastDisburse = new Date(amazonNextEligible - AMAZON_COOLDOWN_MS).toISOString();
+
+        // Our scheduling: stack the smart-or-fixed buffer on top of Amazon's
+        // eligible time so our retry never lands BEFORE their cooldown ends.
+        // Same pattern as processResult success path.
+        const smartMin = await getSmartDelay();
+        let jitterMin;
+        if (smartMin !== null) {
+          jitterMin = smartMin;
+        } else {
+          const { jitterMaxMinutes = 5 } = await chrome.storage.local.get('jitterMaxMinutes');
+          jitterMin = 2 + Math.floor(Math.random() * Math.max(1, jitterMaxMinutes - 1));
+        }
+        const ourNextEligible = amazonNextEligible + (jitterMin * 60000);
+
         const updates = {
-          [`nextEligible_${accountType}`]: nextEligible,
+          [`nextEligible_${accountType}`]: ourNextEligible,
           [`lastResult_${accountType}`]: 'cooldown',
           [`lastResultDetail_${accountType}`]: result.alertText.substring(0, 200),
           [`lastDisburse_${accountType}`]: derivedLastDisburse
         };
-        // Seed firstDisburse only if absent (preserves real first-disburse
-        // timestamp once one exists from an actual click-through).
         const existing = await chrome.storage.local.get(`firstDisburse_${accountType}`);
         if (!existing[`firstDisburse_${accountType}`]) {
           updates[`firstDisburse_${accountType}`] = derivedLastDisburse;
         }
         await chrome.storage.local.set(updates);
-        await addLog(`${accountType}: cooldown ${cooldownMinutes} min — next eligible ${new Date(nextEligible).toLocaleString()}; last payout ~${new Date(derivedLastDisburse).toLocaleString()}`);
+        await addLog(`${accountType}: cooldown ${cooldownMinutes} min — Amazon eligible ${new Date(amazonNextEligible).toLocaleString()}, our retry +${jitterMin}m at ${new Date(ourNextEligible).toLocaleString()}; last payout ~${new Date(derivedLastDisburse).toLocaleString()}`);
         await appendMegaDebug({
           kind: 'discover_recorded',
-          accountType, cooldownMinutes, nextEligible,
+          accountType, cooldownMinutes,
+          amazonNextEligible, ourNextEligible, jitterMin,
           derivedLastDisburse,
           alertSnippet: result.alertText.substring(0, 200)
         });
         await releaseLock();
-        return { ok: true, cooldownMinutes, nextEligible };
+        return { ok: true, cooldownMinutes, nextEligible: ourNextEligible };
       }
       // Alert visible but couldn't parse hrs/mins — log raw text for dx
       await appendMegaDebug({
