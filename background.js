@@ -2742,40 +2742,26 @@ async function runNow(opts = {}) {
     }
   }
 
-  // Cooldown respect: filter pendingAccountsDue to only accounts where local
-  // nextEligible_<TYPE> has expired. Server enforces cooldown regardless of
-  // dashboard button visual state — a click during cooldown burns an
-  // attempt against any Amazon-side throttle counter and produces a
-  // "navigation timeout" false-failure log entry. opts.force lets caller
-  // bypass for explicit testing.
+  // Manual run policy (cpaswm amendment): manual = always re-discover, ignore
+  // cached cooldown. Push all accounts to dashboard regardless of recorded
+  // nextEligible_<TYPE>. The dashboard sensor detects actual button state:
+  //   - button enabled  → click flow (cooldown cleared, fresh disbursement)
+  //   - button disabled → discoverCooldown refreshes our cached value
+  // Either way we're trusting the live page, not stale storage. Heartbeat
+  // (checkDue) still respects the cooldown cache — that's the cheap path.
+  const accountsDue = ['PAYABLE', 'INVOICING'];
   const cdData = await chrome.storage.local.get(['nextEligible_PAYABLE', 'nextEligible_INVOICING']);
   const now = Date.now();
-  const MAX_AHEAD = 90 * 24 * 60 * 60 * 1000;
-  const accountsDue = [];
-  const skipped = [];
-  for (const acctType of ['PAYABLE', 'INVOICING']) {
+  const cachedCooldowns = [];
+  for (const acctType of accountsDue) {
     const ne = cdData[`nextEligible_${acctType}`];
-    // R4F4/R4F5: same strict guard — plausibility-filter then cooldown check.
-    const valid = typeof ne === 'number' && isFinite(ne) && ne > 0 && ne < (now + MAX_AHEAD);
-    if (!opts.force && valid && now < ne) {
+    if (typeof ne === 'number' && isFinite(ne) && now < ne) {
       const remainMin = Math.round((ne - now) / 60000);
-      skipped.push(`${acctType} (${remainMin}m left)`);
-      continue;
+      cachedCooldowns.push(`${acctType} (${remainMin}m left, will re-verify)`);
     }
-    accountsDue.push(acctType);
   }
-
-  if (accountsDue.length === 0) {
-    const msg = `Manual run skipped — all accounts in cooldown: ${skipped.join(', ')}. Shift-click Run Now to bypass.`;
-    await addLog(msg, 'cooldown');
-    await appendMegaDebug({ kind: 'run_now_skipped', reason: 'all_cooldown', skipped });
-    notify('Run skipped', `All accounts in cooldown: ${skipped.join(', ')}`);
-    try { chrome.runtime.sendMessage({ action: 'runComplete' }); } catch (_) {}
-    return;
-  }
-
-  if (skipped.length > 0) {
-    await addLog(`Manual run: skipping ${skipped.join(', ')}; running ${accountsDue.join(', ')}`);
+  if (cachedCooldowns.length > 0) {
+    await addLog(`Manual run: ignoring cached cooldown — ${cachedCooldowns.join(', ')}`);
   }
 
   await chrome.storage.local.remove(['processingLock', 'pendingDashboardTab', 'pendingAccountsDue', 'queuedAccounts']);
