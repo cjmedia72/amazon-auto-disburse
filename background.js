@@ -2167,12 +2167,11 @@ async function discoverCooldown(tabId, accountType) {
       if (cooldownMinutes > 0) {
         const now = Date.now();
         const nextEligible = now + cooldownMinutes * 60000;
-        // Derive last-payout time: Amazon's per-account cooldown cycle is
-        // ~24h2m (BASE_DISBURSE_MS). lastDisburse = nextEligible - cycle.
-        // This is "good enough" for the popup's "Last payout" display on
-        // first-install — exact value gets overwritten on the next
-        // successful click-through cycle.
-        const derivedLastDisburse = new Date(nextEligible - BASE_DISBURSE_MS).toISOString();
+        // Derive last-payout time: Amazon's actual cooldown is exactly 24h.
+        // (BASE_DISBURSE_MS includes our 2-minute scheduling buffer — that's
+        // for OUR retry timing, not for deriving Amazon's last-payout time.)
+        const AMAZON_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+        const derivedLastDisburse = new Date(nextEligible - AMAZON_COOLDOWN_MS).toISOString();
         const updates = {
           [`nextEligible_${accountType}`]: nextEligible,
           [`lastResult_${accountType}`]: 'cooldown',
